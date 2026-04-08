@@ -137,7 +137,7 @@ public class Client {
             case TYPE_HEARTBEAT:
                 System.out.println("Heartbeat received");
 
-                sendMessage(output, version, TYPE_PING, "PING");
+                sendMessage(output, version, TYPE_HEARTBEAT, "Connection is alive...");
                 break;
 
             case TYPE_SERVER_CLOSE:

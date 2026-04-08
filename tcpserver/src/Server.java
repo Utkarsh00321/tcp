@@ -121,9 +121,8 @@ public class Server {
                         }
                     }
 
-                    System.out.println("Client not responding. Closing the connection...");
-
                     if(!isAlive){
+                        System.out.println("Client not responding. Closing the connection...");
                         break;
                     }
 
@@ -199,6 +198,10 @@ public class Server {
                 respPayload = payload;
                 break;
 
+            case TYPE_HEARTBEAT:
+                System.out.println("Recieved the heartbeat. Connection is alive...");
+                break;
+
             case TYPE_SERVER_CLOSE:
                 respType = TYPE_CLOSE_ACK;
                 break;
@@ -211,8 +214,9 @@ public class Server {
             default:
                 respType = type;
         }
-
-        sendMessage(output, respLength, respVersion, respType, respPayload);
+        if(type!=TYPE_HEARTBEAT){
+            sendMessage(output, respLength, respVersion, respType, respPayload);
+        }
 
         if(type == TYPE_SERVER_CLOSE || type == TYPE_CLOSE_ACK){
             return false;
