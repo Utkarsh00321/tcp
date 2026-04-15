@@ -10,21 +10,14 @@ import java.util.concurrent.*;
 public class Server {
     private static final int PORT = 8000;
 
-    // Supported protocol versions
     private static Set<Byte> versions;
-
-    // Message type mapping
     private static Map<Byte, String> messageTypes;
 
     private ExecutorService pool;
-
-    // Shutdown flag shared across threads
     private volatile boolean shutdown = false;
 
-    // Active client connections
     private ConcurrentHashMap<Socket, DataOutputStream> connections;
 
-    // Message type constants
     private static final byte TYPE_PING = 1;
     private static final byte TYPE_PONG = 2;
     private static final byte TYPE_REQUEST = 3;
@@ -35,38 +28,31 @@ public class Server {
     private static final byte TYPE_SERVER_SHUTDOWN = 10;
     private static final byte TYPE_ERROR = 5;
 
-    int getPort(){
-        return this.PORT;
-    }
-
     static {
         versions = new HashSet<>(Arrays.asList((byte)1,(byte)2,(byte)3));
 
-        messageTypes = new HashMap<>();
-        messageTypes.put(TYPE_PING, "PING");
-        messageTypes.put(TYPE_REQUEST, "REQUEST");
-        messageTypes.put(TYPE_SERVER_CLOSE, "CLOSE");
-        messageTypes.put(TYPE_CLOSE_ACK, "CLOSE_ACK");
-        messageTypes.put(TYPE_HEARTBEAT, "HEARTBEAT");
+        Map<Byte, String> temp = new HashMap<>();
+        temp.put(TYPE_PING, "PING");
+        temp.put(TYPE_REQUEST, "REQUEST");
+        temp.put(TYPE_SERVER_CLOSE, "CLOSE");
+        temp.put(TYPE_CLOSE_ACK, "CLOSE_ACK");
+        temp.put(TYPE_HEARTBEAT, "HEARTBEAT");
 
-        messageTypes = Collections.unmodifiableMap(messageTypes);
+        messageTypes = Collections.unmodifiableMap(temp);
     }
 
     public void startServer() {
-        System.out.println("[SERVER] Starting the server on port: " + getPort());
+        System.out.println("[SERVER] Starting the server on port: " + PORT);
 
         try(ServerSocket severSocket = new ServerSocket(PORT)){
-            System.out.println("[SERVER] Listening on port: " + getPort());
+
+            System.out.println("[SERVER] Listening on port: " + PORT);
 
             int cores = Runtime.getRuntime().availableProcessors();
-
-            // Thread pool for handling clients
             pool = Executors.newFixedThreadPool(cores * 2);
-
             connections = new ConcurrentHashMap<>();
 
-            // Thread to listen for shutdown command
-            Thread shutDownListener = new Thread(()->{
+            Thread shutDownListener = new Thread(() -> {
                 Scanner scanner = new Scanner(System.in);
                 System.out.print("[SHUTDOWN] Enter server commands: ");
 
@@ -83,13 +69,13 @@ public class Server {
                         // Notify all clients
                         for(DataOutputStream output: connections.values()){
                             try{
-                                sendMessage(output, 0, (byte)1,TYPE_SERVER_SHUTDOWN , new byte[]{});
+                                sendMessage(output, 0, (byte)1, TYPE_SERVER_SHUTDOWN , new byte[]{});
                             }catch (IOException e){
                                 e.printStackTrace();
                             }
                         }
 
-                        // Gracefully shutdown thread pool
+                        // Graceful shutdown
                         shutdownAndAwaitTermination(pool);
 
                     } catch (IOException e) {
@@ -107,7 +93,6 @@ public class Server {
                     Socket clientSocket = severSocket.accept();
                     System.out.println("[SERVER] Accepted connection: " + clientSocket);
 
-                    // Assign client to worker thread
                     pool.submit(() -> {
                         try {
                             handleClient(clientSocket);
@@ -121,7 +106,7 @@ public class Server {
                         System.out.println("[SERVER] Server socket closed due to shutdown.");
                         break;
                     }else{
-                        throw new SocketException();
+                        throw new RuntimeException(e);
                     }
                 }catch (IOException e){
                     e.printStackTrace();
@@ -132,8 +117,7 @@ public class Server {
         }
     }
 
-    // Worker thread: handles one client
-    public void handleClient(Socket clientSocket) throws TimeoutException, IOException, InterruptedException {
+    public void handleClient(Socket clientSocket) throws Exception {
         try(clientSocket){
             clientSocket.setSoTimeout(90000);
 
@@ -144,15 +128,7 @@ public class Server {
 
             while(true){
                 try{
-                    Message message = readAndValidateMessage(input, output);
-
-                    if(message==null){
-                        continue;
-                    }
-
-                    System.out.println("[WORKER] Received - length: " + message.getLength()
-                            + " version: " + message.getVersion()
-                            + " type: " + message.getType());
+                    Message message = ProtocolDecoder.decode(input, versions, messageTypes);
 
                     boolean isAlive = processMessage(message, output);
 
@@ -164,96 +140,45 @@ public class Server {
 
                     System.out.println("[WORKER] Client inactive. Sending heartbeat...");
 
-                    int heartBeatCount = 0;
-                    boolean isAlive = false;
+                    sendMessage(output, 0, (byte)1, TYPE_HEARTBEAT, new byte[]{});
 
-                    while(heartBeatCount < 3){
-                        System.out.println("[WORKER] Sending heartbeat #" + (heartBeatCount + 1));
+                } catch (EOFException e){
+                    System.out.println("[WORKER] Client closed connection!");
+                    break;
 
-                        sendMessage(output, 0, (byte)1, TYPE_HEARTBEAT, new byte[]{});
+                } catch (ProtocolException e){
 
-                        clientSocket.setSoTimeout(30000);
+                    ExceptionHandler.handle(e, output);
 
-                        try{
-                            Message message = readAndValidateMessage(input, output);
-
-                            if(message==null){
-                                continue;
-                            }
-
-                            System.out.println("[WORKER] Received response after heartbeat");
-
-                            if(processMessage(message, output)){
-                                isAlive = true;
-                                clientSocket.setSoTimeout(90000);
-                                break;
-                            }
-
-                        }catch (SocketTimeoutException ex){
-                            heartBeatCount++;
-                        }
-                    }
-
-                    if(!isAlive){
-                        System.out.println("[WORKER] Client not responding. Closing connection.");
+                    if(e.isFatal()){
+                        System.out.println("[WORKER] Fatal protocol error. Closing connection.");
                         break;
                     }
 
-                }catch (EOFException e){
-                    System.out.println("[WORKER] Client closed connection!");
-                    throw new EOFException(e.getMessage());
+                } catch (SocketException e){
+                    if(shutdown){
+                        System.out.println("[WORKER] Socket closed due to server shutdown.");
+                        break;
+                    }else{
+                        throw new RuntimeException(e);
+                    }
 
-                }catch (IOException e){
-                    throw new IOException(e.getMessage());
+                } catch (IOException e){
+                    throw new RuntimeException(e);
                 }
             }
-        }finally {
+        } finally {
             connections.remove(clientSocket);
         }
     }
 
-    // Sends a framed message to client
     public void sendMessage(DataOutputStream output, int length, byte version, byte type, byte[] payload) throws IOException {
-        try{
-            output.writeInt(length);
-            output.writeByte(version);
-            output.writeByte(type);
-            output.write(payload);
-            output.flush();
-        }catch (IOException e){
-            System.out.println("[WORKER] Failed to write response.");
-            e.printStackTrace();
-            throw new IOException(e.getMessage());
-        }
+        Message message = new Message(length, version, type, payload);
+        ProtocolEncoder.encode(output, message);
     }
 
-    // Reads and validates incoming message
-    private Message readAndValidateMessage(DataInputStream input, DataOutputStream output) throws IOException {
-        int length = input.readInt();
-        byte version = input.readByte();
-        byte type = input.readByte();
-
-        if (length < 0 || length > 1000000) {
-            throw new IOException("Invalid payload length");
-        }
-
-        if (!versions.contains(version)) {
-            throw new IOException("Invalid protocol version");
-        }
-
-        byte[] payload = new byte[length];
-        input.readFully(payload);
-
-        if (!messageTypes.containsKey(type)) {
-            sendMessage(output, 0, (byte)1, TYPE_ERROR, "Invalid message type".getBytes(StandardCharsets.UTF_8));
-            return null;
-        }
-
-        return new Message(length, version, type, payload);
-    }
-
-    // Business logic for message handling
     public boolean processMessage(Message message, DataOutputStream output) throws IOException {
+
         int length = message.getLength();
         byte type = message.getType();
         byte version = message.getVersion();
@@ -286,10 +211,7 @@ public class Server {
 
             case TYPE_CLOSE_ACK:
                 System.out.println("[WORKER] Received CLOSE_ACK. Closing connection.");
-                break;
-
-            default:
-                respType = type;
+                return false;
         }
 
         if(type!=TYPE_HEARTBEAT){
@@ -303,7 +225,6 @@ public class Server {
         return true;
     }
 
-    // Gracefully shutdown executor service
     void shutdownAndAwaitTermination(ExecutorService executor) {
         executor.shutdown();
         try {
